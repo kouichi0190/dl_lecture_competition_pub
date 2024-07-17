@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from src.models.base import *
 from typing import Dict, Any
+import torch.nn.functional as F
 
 _BASE_CHANNELS = 64
 
@@ -62,7 +63,12 @@ class EVFlowNet(nn.Module):
         inputs, flow = self.decoder4(inputs)
         flow_dict['flow3'] = flow.clone()
 
-        return flow
+        return {
+            'flow0': F.interpolate(flow_dict['flow0'], scale_factor=8, mode='bilinear', align_corners=False),
+            'flow1': F.interpolate(flow_dict['flow1'], scale_factor=4, mode='bilinear', align_corners=False),
+            'flow2': F.interpolate(flow_dict['flow2'], scale_factor=2, mode='bilinear', align_corners=False),
+            'flow3': flow_dict['flow3']
+        }
         
 
 # if __name__ == "__main__":

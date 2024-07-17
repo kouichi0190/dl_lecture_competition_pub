@@ -2,6 +2,7 @@ import torch
 import hydra
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
+import torchvision.transforms.functional as TF
 import random
 import numpy as np
 from src.models.evflownet import EVFlowNet
@@ -43,6 +44,42 @@ def save_optical_flow_to_npy(flow: torch.Tensor, file_name: str):
     file_name: str => ファイル名
     '''
     np.save(f"{file_name}.npy", flow.cpu().numpy())
+
+def multi_scale_loss(pred_flows, gt_flow):
+    loss = 0
+    weights =  [0.01, 0.02, 0.08, 0.32]   # 各スケールの重み
+    for i, (flow, weight) in enumerate(zip(pred_flows.values(), weights)):
+        loss += weight * compute_epe_error(flow, gt_flow)
+    return loss
+
+def augment_data(event_volume, flow):
+    if random.random() > 0.9:
+        event_volume, flow = horizontal_flip(event_volume, flow)
+    
+    if random.random() > 0.9:
+        event_volume, flow = random_rotation(event_volume, flow)
+    
+    if random.random() > 0.9:
+        event_volume = polarity_inversion(event_volume)
+    
+    
+    return event_volume, flow
+
+def horizontal_flip(event_volume, flow):
+    flipped_event = torch.flip(event_volume, [3])
+    flipped_flow = torch.flip(flow, [3])
+    flipped_flow[:, 0] *= -1  # x方向の流れを反転
+    return flipped_event, flipped_flow
+
+def random_rotation(event_volume, flow, max_angle=5):
+    angle = random.uniform(-max_angle, max_angle)
+    rotated_event = TF.rotate(event_volume, angle)
+    rotated_flow = TF.rotate(flow, angle)
+    return rotated_event, rotated_flow
+
+def polarity_inversion(event_volume):
+    return -event_volume
+
 
 @hydra.main(version_base=None, config_path="configs", config_name="base")
 def main(args: DictConfig):
@@ -127,16 +164,18 @@ def main(args: DictConfig):
             batch: Dict[str, Any]
             event_image = batch["event_volume"].to(device) # [B, 4, 480, 640]
             ground_truth_flow = batch["flow_gt"].to(device) # [B, 2, 480, 640]
+            event_image, ground_truth_flow = augment_data(event_image, ground_truth_flow)
             flow = model(event_image) # [B, 2, 480, 640]
-            loss: torch.Tensor = compute_epe_error(flow, ground_truth_flow)
-            print(f"batch {i} loss: {loss.item()}")
+            loss: torch.Tensor = multi_scale_loss(flow, ground_truth_flow)
+            flow3 = flow['flow3']
+            true_loss = compute_epe_error(flow3, ground_truth_flow)
+            print(f"batch {i} loss: {loss.item()}, true_loss: {true_loss.item()}")
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
         print(f'Epoch {epoch+1}, Loss: {total_loss / len(train_data)}')
-
     # Create the directory if it doesn't exist
     if not os.path.exists('checkpoints'):
         os.makedirs('checkpoints')
@@ -156,8 +195,9 @@ def main(args: DictConfig):
         print("start test")
         for batch in tqdm(test_data):
             batch: Dict[str, Any]
-            event_image = batch["event_volume_old"].to(device)
-            batch_flow = model(event_image) # [1, 2, 480, 640]
+            event_image = batch["event_volume"].to(device)
+            batch_flow_dict = model(event_image) # [1, 2, 480, 640]
+            batch_flow = batch_flow_dict['flow3']
             flow = torch.cat((flow, batch_flow), dim=0)  # [N, 2, 480, 640]
         print("test done")
     # ------------------
